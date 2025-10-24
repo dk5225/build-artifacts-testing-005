@@ -1,7 +1,0 @@
-.nyc_output
-*.log
-*.tgz
-coverage
-lint.json
-node_modules
-test.xml

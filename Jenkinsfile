@@ -1,95 +1,71 @@
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    PYTHON_DIR = "${env.WORKSPACE}/python"  // Use the same Python path as first pipeline
-    PYTHON_URL = "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.11.7+20240107-x86_64-unknown-linux-gnu-install_only.tar.gz"
-    VENV_DIR = "${env.WORKSPACE}/venv"
-    SCAN_DIR = "${env.WORKSPACE}/test-nodejs-code"
-  }
-
-  stages {
-    stage('Ensure Python 3.11') {
-      steps {
-        echo "🐍 Checking if Python 3.11 exists..."
-        sh '''
-          if command -v python3.11 >/dev/null 2>&1; then
-              echo "✅ System Python 3.11 found: $(python3.11 --version)"
-          elif [ -x "$PYTHON_DIR/bin/python3.11" ]; then
-              echo "✅ Prebuilt Python 3.11 already installed at $PYTHON_DIR"
-              "$PYTHON_DIR/bin/python3.11" --version
-          else
-              echo "⬇️ Installing prebuilt Python 3.11..."
-              mkdir -p "$PYTHON_DIR"
-              cd "$PYTHON_DIR"
-              curl -L -o python.tar.gz "$PYTHON_URL"
-              tar -xzf python.tar.gz --strip-components=1
-              echo "✅ Python extracted to: $PYTHON_DIR"
-          fi
-        '''
-      }
+    environment {
+        SARIF_FILE = "gitleaks-report.sarif"
+        GITLEAKS_BIN = "${WORKSPACE}/bin"
+        PATH = "${GITLEAKS_BIN}:${env.PATH}"
     }
 
-    stage('Create Virtual Environment') {
-      steps {
-        echo "🐍 Creating virtual environment if missing..."
-        sh '''
-          if [ ! -d "$VENV_DIR" ]; then
-            $PYTHON_DIR/bin/python3.11 -m venv "$VENV_DIR"
-          else
-            echo "✅ Virtualenv already exists."
-          fi
-        '''
-      }
-    }
+    stages {
 
-    stage('Install njsscan if missing') {
-      steps {
-        echo "📦 Checking for njsscan in venv..."
-        sh '''
-          source "$VENV_DIR/bin/activate"
-          if ! njsscan --version > /dev/null 2>&1; then
-            pip install --upgrade pip
-            pip install njsscan
-          else
-            echo "✅ njsscan already installed in venv."
-          fi
-        '''
-      }
-    }
+        stage('Install Gitleaks') {
+            steps {
+                sh '''
+                    mkdir -p $GITLEAKS_BIN
+                    if ! [ -x "$GITLEAKS_BIN/gitleaks" ]; then
+                        echo "Installing gitleaks locally in $GITLEAKS_BIN ..."
+                        GITLEAKS_VERSION=8.18.1
+                        curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
+                        -o gitleaks.tar.gz
+                        tar -xzf gitleaks.tar.gz -C $GITLEAKS_BIN gitleaks
+                        chmod +x $GITLEAKS_BIN/gitleaks
+                    fi
+                    gitleaks version
+                '''
+            }
+        }
 
-    stage('Install semgrep if missing') {
-      steps {
-        echo "📦 Checking for semgrep in venv..."
-        sh '''
-          source "$VENV_DIR/bin/activate"
-          if ! semgrep --version > /dev/null 2>&1; then
-            pip install semgrep
-          else
-            echo "✅ semgrep already installed in venv."
-          fi
-        '''
-      }
-    }
+        stage('Prepare SARIF File') {
+            steps {
+                sh """
+                    if [ -f "${SARIF_FILE}" ]; then
+                        rm -f "${SARIF_FILE}"
+                    fi
+                """
+            }
+        }
 
-    stage('Run njsscan and Output SARIF') {
-      steps {
-        echo "🚨 Running njsscan on $SCAN_DIR..."
-        sh '''
-          source "$VENV_DIR/bin/activate"
-          njsscan --sarif "$SCAN_DIR" > njsscan-output.sarif || true
-          echo "📄 ==== SARIF Output Start ===="
-          cat njsscan-output.sarif
-          echo "📄 ==== SARIF Output End ===="
-        '''
-      }
-    }
-  }
+        stage('Run Gitleaks Scan') {
+            steps {
+                sh """
+                    ${GITLEAKS_BIN}/gitleaks detect \
+                    --no-git \
+                    --source . \
+                    --report-format sarif \
+                    --report-path ${SARIF_FILE} || true
+                """
+            }
+        }
 
-  post {
-    always {
-      archiveArtifacts artifacts: "njsscan-output.sarif", fingerprint: true
+        stage('Show SARIF Output') {
+            steps {
+                script {
+                    if (fileExists("${SARIF_FILE}")) {
+                        def sarifReport = readFile("${SARIF_FILE}")
+                        echo "===== Gitleaks SARIF Report ====="
+                        echo sarifReport
+                    } else {
+                        echo "No SARIF report found"
+                    }
+                }
+            }
+        }
+
+        stage('Archive SARIF Report') {
+            steps {
+                archiveArtifacts artifacts: "${SARIF_FILE}", fingerprint: true
+            }
+        }
     }
-  }
 }
- 
